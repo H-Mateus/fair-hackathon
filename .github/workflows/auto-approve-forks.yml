@@ -1,0 +1,59 @@
+name: Auto-approve fork CI
+
+# Public repos require maintainer approval for workflows on first-time
+# contributors' fork PRs. For a hackathon teaching repo we don't want that
+# friction — every PR should score automatically. This workflow uses the
+# `pull_request_target` event (which runs in the base repo's context with
+# a write token and bypasses the approval gate) to auto-approve any
+# `action_required` workflow runs queued for the incoming PR.
+#
+# It does NOT check out PR code, so it's safe to run with write tokens.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: auto-approve-forks-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    # Only fork PRs need approval; same-repo PRs run automatically.
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Approve any pending workflow runs for this PR
+        uses: actions/github-script@v7
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const head_sha = process.env.HEAD_SHA;
+
+            for (let attempt = 0; attempt < 24; attempt++) {
+              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo, head_sha, event: 'pull_request',
+              });
+              const pending = (data.workflow_runs || [])
+                .filter(r => r.conclusion === 'action_required');
+              for (const run of pending) {
+                try {
+                  await github.rest.actions.approveWorkflowRun({
+                    owner, repo, run_id: run.id,
+                  });
+                  core.notice(`Approved run ${run.id} (${run.name})`);
+                } catch (e) {
+                  core.warning(`Approve failed for ${run.id}: ${e.message}`);
+                }
+              }
+              if (pending.length > 0) return;
+              await new Promise(r => setTimeout(r, 5000));
+            }
+            core.warning('No action_required runs found within 2 minutes; nothing to approve.');
