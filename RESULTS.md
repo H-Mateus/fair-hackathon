@@ -17,6 +17,7 @@ Columns are F-UJI subscores: F=Findable, A=Accessible, I=Interoperable, R=Reusab
 | 08 | `strip_rdf_metadata` | **27.08** | 35.71 (2.5/7) | 33.33 (1.0/3) | 25.00 (1.0/4) | 20.00 (2.0/10) | 1.0 | (self-hosted) |
 | 09 | `strip_head_metadata` | **8.33** | 14.29 (1/7) | 33.33 (1/3) | 0.00 (0/4) | 0.00 (0/10) | 1.0 | (self-hosted) |
 | 10 | `obfuscate_files` | **8.33** | 14.29 (1/7) | 33.33 (1/3) | 0.00 (0/4) | 0.00 (0/10) | 1.0 | (self-hosted) |
+| 11 | `restore_license` | **8.33** | 14.29 (1/7) | 33.33 (1/3) | 0.00 (0/4) | 0.00 (0/10) | 1.0 | (self-hosted) |
 
 ## How to read this
 

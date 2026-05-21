@@ -1,23 +1,19 @@
 name: F-UJI Score
 
+# Runs on every PR (no path filter), so the F-UJI score gates every change.
+# Posting the comment and publishing the Checks-API run happens in the
+# companion `fuji-report.yml` workflow, which is triggered via `workflow_run`
+# so it has the write token needed for PRs opened from forks.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - 'dataset/**'
-      - 'server/**'
-      - 'scripts/measure.sh'
-      - 'scripts/pr_comment.py'
-      - '.github/workflows/fuji-score.yml'
 
-# One run per PR; cancel superseded runs on new pushes.
 concurrency:
   group: fuji-score-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   score:
@@ -29,10 +25,12 @@ jobs:
       FUJI_USER: marvel
       FUJI_PASS: wonderwoman
       DATASET_PORT: '8000'
-      # F-UJI runs with --network=host on the Linux runner, so it can dial
-      # the dataset server at localhost:8000 directly. Outside CI (Docker
-      # Desktop on macOS/Windows) the README uses host.docker.internal.
-      TARGET_URL: http://localhost:8000/
+      # Use the same target hostname the README uses locally. F-UJI seems
+      # to refuse dereferencing `localhost` URLs (treated as SSRF), so
+      # `--network=host` doesn't actually work for it. Instead we map
+      # `host.docker.internal` to the runner's host gateway and let
+      # F-UJI reach the dataset server through that name.
+      TARGET_URL: http://host.docker.internal:8000/
 
     steps:
       - name: Checkout PR head
@@ -46,7 +44,10 @@ jobs:
 
       - name: Start F-UJI service
         run: |
-          docker run -d --name fuji --network=host "$FUJI_IMAGE"
+          docker run -d --name fuji \
+            --add-host=host.docker.internal:host-gateway \
+            -p 1071:1071 \
+            "$FUJI_IMAGE"
           echo "Waiting for F-UJI to accept requests…"
           for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -66,63 +67,83 @@ jobs:
       - name: Score base branch
         run: |
           set -euo pipefail
-          (cd main-baseline && python3 server/serve.py --port "$DATASET_PORT" \
+          # Start the server from main-baseline; nohup + outside any
+          # subshell keeps it alive after this step returns.
+          cd main-baseline
+          nohup python3 server/serve.py --port "$DATASET_PORT" \
               > "$RUNNER_TEMP/server-base.log" 2>&1 &
-            echo $! > "$RUNNER_TEMP/server-base.pid")
+          server_pid=$!
+          echo "$server_pid" > "$RUNNER_TEMP/server-base.pid"
+          cd ..
+          # Verify on 127.0.0.1 (host.docker.internal doesn't resolve on the runner).
           for i in $(seq 1 30); do
-            if curl -fsS "$TARGET_URL" > /dev/null 2>&1; then break; fi
+            if curl -fsS "http://127.0.0.1:${DATASET_PORT}/" > /dev/null 2>&1; then
+              echo "Dataset server up after ${i}s (pid $server_pid)"
+              break
+            fi
             sleep 1
           done
+          curl -sI "http://127.0.0.1:${DATASET_PORT}/" | head -5 || true
+          # Also verify F-UJI's container can reach the server via host gateway.
+          docker exec fuji curl -sI "$TARGET_URL" | head -3 || \
+            echo "WARN: F-UJI container could not reach $TARGET_URL"
           scripts/measure.sh _baseline_main "$TARGET_URL"
           mv assessments/_baseline_main.json "$RUNNER_TEMP/baseline.json"
-          kill "$(cat "$RUNNER_TEMP/server-base.pid")" || true
-          # Give the port a moment to free.
+          kill "$server_pid" 2>/dev/null || true
           sleep 1
 
       - name: Score PR head
         run: |
           set -euo pipefail
-          (python3 server/serve.py --port "$DATASET_PORT" \
+          nohup python3 server/serve.py --port "$DATASET_PORT" \
               > "$RUNNER_TEMP/server-pr.log" 2>&1 &
-            echo $! > "$RUNNER_TEMP/server-pr.pid")
+          server_pid=$!
+          echo "$server_pid" > "$RUNNER_TEMP/server-pr.pid"
           for i in $(seq 1 30); do
-            if curl -fsS "$TARGET_URL" > /dev/null 2>&1; then break; fi
+            if curl -fsS "http://127.0.0.1:${DATASET_PORT}/" > /dev/null 2>&1; then
+              echo "PR dataset server up after ${i}s (pid $server_pid)"
+              break
+            fi
             sleep 1
           done
+          curl -sI "http://127.0.0.1:${DATASET_PORT}/" | head -5 || true
+          docker exec fuji curl -sI "$TARGET_URL" | head -3 || \
+            echo "WARN: F-UJI container could not reach $TARGET_URL"
           scripts/measure.sh _pr_head "$TARGET_URL"
           mv assessments/_pr_head.json "$RUNNER_TEMP/pr.json"
-          kill "$(cat "$RUNNER_TEMP/server-pr.pid")" || true
+          kill "$server_pid" 2>/dev/null || true
+
+      - name: Dump server logs (diagnostic)
+        if: always()
+        run: |
+          echo "=== server-base.log ==="
+          cat "$RUNNER_TEMP/server-base.log" 2>/dev/null || echo "(no base log)"
+          echo "=== server-pr.log ==="
+          cat "$RUNNER_TEMP/server-pr.log"   2>/dev/null || echo "(no pr log)"
 
       - name: Render PR comment
-        id: render
         run: |
           python3 scripts/pr_comment.py \
             "$RUNNER_TEMP/baseline.json" \
             "$RUNNER_TEMP/pr.json" \
             > "$RUNNER_TEMP/comment.md"
-          {
-            echo 'body<<FUJI_EOF'
-            cat "$RUNNER_TEMP/comment.md"
-            echo
-            echo FUJI_EOF
-          } >> "$GITHUB_OUTPUT"
-          # Also surface the comment in the workflow log for easy inspection.
           cat "$RUNNER_TEMP/comment.md"
 
-      - name: Upsert sticky PR comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: fuji-score
-          message: ${{ steps.render.outputs.body }}
+      - name: Save PR metadata for report workflow
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuji-results"
+          cp "$RUNNER_TEMP/baseline.json" "$RUNNER_TEMP/fuji-results/baseline.json"
+          cp "$RUNNER_TEMP/pr.json"       "$RUNNER_TEMP/fuji-results/pr.json"
+          cp "$RUNNER_TEMP/comment.md"    "$RUNNER_TEMP/fuji-results/comment.md"
+          echo "${{ github.event.pull_request.number }}" > "$RUNNER_TEMP/fuji-results/pr_number.txt"
+          echo "${{ github.event.pull_request.head.sha }}" > "$RUNNER_TEMP/fuji-results/pr_sha.txt"
 
-      - name: Upload F-UJI assessment JSONs
+      - name: Upload F-UJI results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuji-assessments
-          path: |
-            ${{ runner.temp }}/baseline.json
-            ${{ runner.temp }}/pr.json
+          name: fuji-results
+          path: ${{ runner.temp }}/fuji-results/
           if-no-files-found: warn
 
       - name: Dump F-UJI logs on failure
