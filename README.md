@@ -1,4 +1,4 @@
-# FAIR Hackathon — repair the broken dataset
+# FAIR Hackathon — repair the broken dataset!
 
 You've inherited a dataset hosting setup that is **as un-FAIR as possible**.
 This repo contains a self-hostable copy of the
