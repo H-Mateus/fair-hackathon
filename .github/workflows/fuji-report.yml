@@ -16,7 +16,12 @@ permissions:
 
 jobs:
   report:
-    if: github.event.workflow_run.event == 'pull_request'
+    # Only when the score workflow finished successfully — cancelled or
+    # failed runs don't produce the `fuji-results` artifact, so reporting
+    # would just 404 on download.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

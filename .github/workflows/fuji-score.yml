@@ -67,31 +67,59 @@ jobs:
       - name: Score base branch
         run: |
           set -euo pipefail
-          (cd main-baseline && python3 server/serve.py --port "$DATASET_PORT" \
+          # Start the server from main-baseline; nohup + outside any
+          # subshell keeps it alive after this step returns.
+          cd main-baseline
+          nohup python3 server/serve.py --port "$DATASET_PORT" \
               > "$RUNNER_TEMP/server-base.log" 2>&1 &
-            echo $! > "$RUNNER_TEMP/server-base.pid")
+          server_pid=$!
+          echo "$server_pid" > "$RUNNER_TEMP/server-base.pid"
+          cd ..
+          # Verify on 127.0.0.1 (host.docker.internal doesn't resolve on the runner).
           for i in $(seq 1 30); do
-            if curl -fsS "$TARGET_URL" > /dev/null 2>&1; then break; fi
+            if curl -fsS "http://127.0.0.1:${DATASET_PORT}/" > /dev/null 2>&1; then
+              echo "Dataset server up after ${i}s (pid $server_pid)"
+              break
+            fi
             sleep 1
           done
+          curl -sI "http://127.0.0.1:${DATASET_PORT}/" | head -5 || true
+          # Also verify F-UJI's container can reach the server via host gateway.
+          docker exec fuji curl -sI "$TARGET_URL" | head -3 || \
+            echo "WARN: F-UJI container could not reach $TARGET_URL"
           scripts/measure.sh _baseline_main "$TARGET_URL"
           mv assessments/_baseline_main.json "$RUNNER_TEMP/baseline.json"
-          kill "$(cat "$RUNNER_TEMP/server-base.pid")" || true
+          kill "$server_pid" 2>/dev/null || true
           sleep 1
 
       - name: Score PR head
         run: |
           set -euo pipefail
-          (python3 server/serve.py --port "$DATASET_PORT" \
+          nohup python3 server/serve.py --port "$DATASET_PORT" \
               > "$RUNNER_TEMP/server-pr.log" 2>&1 &
-            echo $! > "$RUNNER_TEMP/server-pr.pid")
+          server_pid=$!
+          echo "$server_pid" > "$RUNNER_TEMP/server-pr.pid"
           for i in $(seq 1 30); do
-            if curl -fsS "$TARGET_URL" > /dev/null 2>&1; then break; fi
+            if curl -fsS "http://127.0.0.1:${DATASET_PORT}/" > /dev/null 2>&1; then
+              echo "PR dataset server up after ${i}s (pid $server_pid)"
+              break
+            fi
             sleep 1
           done
+          curl -sI "http://127.0.0.1:${DATASET_PORT}/" | head -5 || true
+          docker exec fuji curl -sI "$TARGET_URL" | head -3 || \
+            echo "WARN: F-UJI container could not reach $TARGET_URL"
           scripts/measure.sh _pr_head "$TARGET_URL"
           mv assessments/_pr_head.json "$RUNNER_TEMP/pr.json"
-          kill "$(cat "$RUNNER_TEMP/server-pr.pid")" || true
+          kill "$server_pid" 2>/dev/null || true
+
+      - name: Dump server logs (diagnostic)
+        if: always()
+        run: |
+          echo "=== server-base.log ==="
+          cat "$RUNNER_TEMP/server-base.log" 2>/dev/null || echo "(no base log)"
+          echo "=== server-pr.log ==="
+          cat "$RUNNER_TEMP/server-pr.log"   2>/dev/null || echo "(no pr log)"
 
       - name: Render PR comment
         run: |
