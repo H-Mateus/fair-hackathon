@@ -1,0 +1,108 @@
+name: F-UJI Report
+
+# Companion to `fuji-score.yml`. Runs in the base repo's context via
+# `workflow_run`, so it has the write token needed to post comments and
+# create Checks-API runs on PRs that come from forks.
+on:
+  workflow_run:
+    workflows: ["F-UJI Score"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  actions: read
+
+jobs:
+  report:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download fuji-results artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fuji-results
+          path: fuji-results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read PR metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          pr_number=$(cat fuji-results/pr_number.txt | tr -d '[:space:]')
+          pr_sha=$(cat fuji-results/pr_sha.txt | tr -d '[:space:]')
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "pr_sha=$pr_sha"       >> "$GITHUB_OUTPUT"
+          echo "Reporting on PR #$pr_number at $pr_sha"
+
+      - name: Upsert sticky PR comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: fuji-score
+          number: ${{ steps.meta.outputs.pr_number }}
+          path: fuji-results/comment.md
+
+      - name: Publish F-UJI check run
+        uses: actions/github-script@v7
+        env:
+          PR_SHA: ${{ steps.meta.outputs.pr_sha }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const baseline = JSON.parse(fs.readFileSync('fuji-results/baseline.json', 'utf8'));
+            const pr       = JSON.parse(fs.readFileSync('fuji-results/pr.json',       'utf8'));
+            const comment  = fs.readFileSync('fuji-results/comment.md', 'utf8');
+
+            const bFair = (baseline.summary && baseline.summary.score_percent && baseline.summary.score_percent.FAIR) || 0;
+            const hFair = (pr.summary       && pr.summary.score_percent       && pr.summary.score_percent.FAIR)       || 0;
+            const delta = hFair - bFair;
+            const deltaStr = (delta >= 0 ? '+' : '') + delta.toFixed(2);
+
+            // Build warning annotations for newly-failing metrics so they
+            // surface in the "Annotations" tab of the check.
+            const baseStatus = Object.fromEntries(
+              (baseline.results || []).map(r => [r.metric_identifier, r.test_status])
+            );
+            const annotations = [];
+            for (const r of (pr.results || [])) {
+              if (baseStatus[r.metric_identifier] === 'pass' && r.test_status === 'fail') {
+                annotations.push({
+                  path: 'dataset/index.html',
+                  start_line: 1,
+                  end_line: 1,
+                  annotation_level: 'warning',
+                  title: `F-UJI regression: ${r.metric_identifier}`,
+                  message: r.metric_name || r.metric_identifier,
+                });
+              }
+            }
+
+            // Score is informational only: success on improvement/parity,
+            // neutral on regression — never a hard fail (matches the
+            // hackathon's learning-tone policy).
+            const conclusion = delta >= 0 ? 'success' : 'neutral';
+            const title = `FAIR ${hFair.toFixed(2)}% (Δ ${deltaStr} vs base)`;
+            const detailsUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${process.env.UPSTREAM_RUN_ID}`;
+
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'F-UJI FAIRness',
+              head_sha: process.env.PR_SHA,
+              status: 'completed',
+              conclusion,
+              details_url: detailsUrl,
+              output: {
+                title,
+                summary: comment,
+                annotations: annotations.slice(0, 50),
+              },
+            });
+
+            core.notice(`Published F-UJI check: ${title} → ${conclusion}`);

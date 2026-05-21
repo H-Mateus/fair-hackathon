@@ -1,23 +1,19 @@
 name: F-UJI Score
 
+# Runs on every PR (no path filter), so the F-UJI score gates every change.
+# Posting the comment and publishing the Checks-API run happens in the
+# companion `fuji-report.yml` workflow, which is triggered via `workflow_run`
+# so it has the write token needed for PRs opened from forks.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - 'dataset/**'
-      - 'server/**'
-      - 'scripts/measure.sh'
-      - 'scripts/pr_comment.py'
-      - '.github/workflows/fuji-score.yml'
 
-# One run per PR; cancel superseded runs on new pushes.
 concurrency:
   group: fuji-score-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   score:
@@ -76,7 +72,6 @@ jobs:
           scripts/measure.sh _baseline_main "$TARGET_URL"
           mv assessments/_baseline_main.json "$RUNNER_TEMP/baseline.json"
           kill "$(cat "$RUNNER_TEMP/server-base.pid")" || true
-          # Give the port a moment to free.
           sleep 1
 
       - name: Score PR head
@@ -94,35 +89,28 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/server-pr.pid")" || true
 
       - name: Render PR comment
-        id: render
         run: |
           python3 scripts/pr_comment.py \
             "$RUNNER_TEMP/baseline.json" \
             "$RUNNER_TEMP/pr.json" \
             > "$RUNNER_TEMP/comment.md"
-          {
-            echo 'body<<FUJI_EOF'
-            cat "$RUNNER_TEMP/comment.md"
-            echo
-            echo FUJI_EOF
-          } >> "$GITHUB_OUTPUT"
-          # Also surface the comment in the workflow log for easy inspection.
           cat "$RUNNER_TEMP/comment.md"
 
-      - name: Upsert sticky PR comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: fuji-score
-          message: ${{ steps.render.outputs.body }}
+      - name: Save PR metadata for report workflow
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuji-results"
+          cp "$RUNNER_TEMP/baseline.json" "$RUNNER_TEMP/fuji-results/baseline.json"
+          cp "$RUNNER_TEMP/pr.json"       "$RUNNER_TEMP/fuji-results/pr.json"
+          cp "$RUNNER_TEMP/comment.md"    "$RUNNER_TEMP/fuji-results/comment.md"
+          echo "${{ github.event.pull_request.number }}" > "$RUNNER_TEMP/fuji-results/pr_number.txt"
+          echo "${{ github.event.pull_request.head.sha }}" > "$RUNNER_TEMP/fuji-results/pr_sha.txt"
 
-      - name: Upload F-UJI assessment JSONs
+      - name: Upload F-UJI results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuji-assessments
-          path: |
-            ${{ runner.temp }}/baseline.json
-            ${{ runner.temp }}/pr.json
+          name: fuji-results
+          path: ${{ runner.temp }}/fuji-results/
           if-no-files-found: warn
 
       - name: Dump F-UJI logs on failure
