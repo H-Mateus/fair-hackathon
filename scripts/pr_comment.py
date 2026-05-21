@@ -66,10 +66,10 @@ def render(baseline: dict, pr: dict) -> str:
     headline = (
         f"### 🧪 F-UJI FAIRness assessment\n\n"
         f"**FAIR: {hs['score_percent'].get('FAIR', 0.0):.2f}%** "
-        f"(was {bs['score_percent'].get('FAIR', 0.0):.2f}% on `main` — {_fmt_delta(fair_delta)})\n\n"
+        f"(initial-commit baseline {bs['score_percent'].get('FAIR', 0.0):.2f}% — {_fmt_delta(fair_delta)})\n\n"
     )
     table = (
-        "| Dimension | `main` | PR | Δ % | Maturity |\n"
+        "| Dimension | initial | PR | Δ % | Maturity |\n"
         "|-----------|-------:|---:|----:|---------:|\n"
         + "\n".join(_row(d, bs, hs) for d in DIMENSIONS)
         + "\n"

@@ -90,7 +90,7 @@ jobs:
             // neutral on regression — never a hard fail (matches the
             // hackathon's learning-tone policy).
             const conclusion = delta >= 0 ? 'success' : 'neutral';
-            const title = `FAIR ${hFair.toFixed(2)}% (Δ ${deltaStr} vs base)`;
+            const title = `FAIR ${hFair.toFixed(2)}% (Δ ${deltaStr} vs initial)`;
             const detailsUrl =
               `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
               `/actions/runs/${process.env.UPSTREAM_RUN_ID}`;

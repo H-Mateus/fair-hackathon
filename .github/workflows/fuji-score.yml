@@ -36,10 +36,13 @@ jobs:
       - name: Checkout PR head
         uses: actions/checkout@v4
 
-      - name: Checkout base branch into ./main-baseline
+      - name: Checkout initial-commit baseline into ./main-baseline
+        # Baseline is pinned to the repo's initial commit, NOT a moving
+        # branch head. Every PR is scored against the same fixed starting
+        # state so deltas are comparable across the hackathon.
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: 75466a862edab4f1410da3b25eb6ffdf62514fb0
           path: main-baseline
 
       - name: Start F-UJI service
